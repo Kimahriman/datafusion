@@ -213,12 +213,14 @@ fn array_array<O: OffsetSizeTrait>(
 
     let mut data = vec![];
     let mut total_len = 0;
+    let mut contains_null = false;
     for arg in args {
         let arg_data = if arg.as_any().is::<NullArray>() {
             ArrayData::new_empty(&data_type)
         } else {
             arg.to_data()
         };
+        contains_null |= arg.is_nullable();
         total_len += arg_data.len();
         data.push(arg_data);
     }
@@ -228,7 +230,8 @@ fn array_array<O: OffsetSizeTrait>(
 
     let capacity = Capacities::Array(total_len);
     let data_ref = data.iter().collect::<Vec<_>>();
-    let mut mutable = MutableArrayData::with_capacities(data_ref, true, capacity);
+    let mut mutable =
+        MutableArrayData::with_capacities(data_ref, contains_null, capacity);
 
     let num_rows = args[0].len();
     for row_idx in 0..num_rows {
@@ -247,7 +250,7 @@ fn array_array<O: OffsetSizeTrait>(
     let data = mutable.freeze();
 
     Ok(Arc::new(GenericListArray::<O>::try_new(
-        Arc::new(Field::new("item", data_type, true)),
+        Arc::new(Field::new("item", data_type, contains_null)),
         OffsetBuffer::new(offsets.into()),
         arrow_array::make_array(data),
         None,
