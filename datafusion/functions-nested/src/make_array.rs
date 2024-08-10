@@ -26,11 +26,11 @@ use arrow_array::{
 use arrow_buffer::OffsetBuffer;
 use arrow_schema::DataType::{LargeList, List, Null};
 use arrow_schema::{DataType, Field};
-use datafusion_common::internal_err;
+use datafusion_common::{internal_err, DataFusionError};
 use datafusion_common::{plan_err, utils::array_into_list_array_nullable, Result};
 use datafusion_expr::type_coercion::binary::comparison_coercion;
-use datafusion_expr::TypeSignature;
 use datafusion_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatility};
+use datafusion_expr::{ExprSchemable, TypeSignature};
 
 use crate::utils::make_scalar_function;
 
@@ -78,7 +78,18 @@ impl ScalarUDFImpl for MakeArray {
         &self.signature
     }
 
-    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Err(DataFusionError::Internal(
+            "return_type should not be called".to_string(),
+        ))
+    }
+
+    fn return_type_from_exprs(
+        &self,
+        args: &[datafusion_expr::Expr],
+        schema: &dyn datafusion_common::ExprSchema,
+        arg_types: &[DataType],
+    ) -> Result<DataType> {
         match arg_types.len() {
             0 => Ok(empty_array_type()),
             _ => {
@@ -94,7 +105,15 @@ impl ScalarUDFImpl for MakeArray {
                     expr_type = DataType::Int64;
                 }
 
-                Ok(List(Arc::new(Field::new("item", expr_type, true))))
+                let mut nullable = false;
+                for arg in args {
+                    if arg.nullable(schema)? {
+                        nullable = true;
+                        break;
+                    }
+                }
+
+                Ok(List(Arc::new(Field::new("item", expr_type, nullable))))
             }
         }
     }
@@ -133,7 +152,7 @@ impl ScalarUDFImpl for MakeArray {
 
 // Empty array is a special case that is useful for many other array functions
 pub(super) fn empty_array_type() -> DataType {
-    DataType::List(Arc::new(Field::new("item", DataType::Int64, true)))
+    DataType::List(Arc::new(Field::new("item", DataType::Int64, false)))
 }
 
 /// `make_array_inner` is the implementation of the `make_array` function.
@@ -213,14 +232,14 @@ fn array_array<O: OffsetSizeTrait>(
 
     let mut data = vec![];
     let mut total_len = 0;
-    let mut contains_null = false;
+    let mut nullable = false;
     for arg in args {
         let arg_data = if arg.as_any().is::<NullArray>() {
             ArrayData::new_empty(&data_type)
         } else {
             arg.to_data()
         };
-        contains_null |= arg.is_nullable();
+        nullable |= arg.is_nullable();
         total_len += arg_data.len();
         data.push(arg_data);
     }
@@ -230,8 +249,7 @@ fn array_array<O: OffsetSizeTrait>(
 
     let capacity = Capacities::Array(total_len);
     let data_ref = data.iter().collect::<Vec<_>>();
-    let mut mutable =
-        MutableArrayData::with_capacities(data_ref, contains_null, capacity);
+    let mut mutable = MutableArrayData::with_capacities(data_ref, nullable, capacity);
 
     let num_rows = args[0].len();
     for row_idx in 0..num_rows {
@@ -250,7 +268,7 @@ fn array_array<O: OffsetSizeTrait>(
     let data = mutable.freeze();
 
     Ok(Arc::new(GenericListArray::<O>::try_new(
-        Arc::new(Field::new("item", data_type, contains_null)),
+        Arc::new(Field::new("item", data_type, nullable)),
         OffsetBuffer::new(offsets.into()),
         arrow_array::make_array(data),
         None,
