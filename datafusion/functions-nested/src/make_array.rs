@@ -168,6 +168,8 @@ pub(crate) fn make_array_inner(arrays: &[ArrayRef]) -> Result<ArrayRef> {
         }
     }
 
+    println!("Found datatype {:?}", data_type);
+
     match data_type {
         // Either an empty array or all nulls:
         Null => {
@@ -225,6 +227,8 @@ fn array_array<O: OffsetSizeTrait>(
     args: &[ArrayRef],
     data_type: DataType,
 ) -> Result<ArrayRef> {
+    println!("array_array called with {:?}", data_type);
+
     // do not accept 0 arguments.
     if args.is_empty() {
         return plan_err!("Array requires at least one argument");
@@ -273,4 +277,72 @@ fn array_array<O: OffsetSizeTrait>(
         arrow_array::make_array(data),
         None,
     )?))
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use arrow_array::{Array, Int64Array};
+    use arrow_schema::DataType;
+    use datafusion_common::{DFSchema, Result, ScalarValue};
+    use datafusion_expr::lit;
+
+    use super::{array_array, make_array_udf};
+
+    fn check_data_type(array: &DataType, expected_element: &DataType, nullable: bool) {
+        match array {
+            DataType::List(field) => {
+                assert_eq!(field.data_type(), expected_element);
+                assert_eq!(field.is_nullable(), nullable);
+            }
+            _ => panic!("Expected list type, got {}", array),
+        }
+    }
+
+    #[test]
+    fn test_return_type_nullability() -> Result<()> {
+        let fun = make_array_udf();
+
+        let array_type = fun.return_type_from_exprs(&[], &DFSchema::empty(), &[])?;
+        check_data_type(&array_type, &DataType::Int64, false);
+
+        let array_type = fun.return_type_from_exprs(
+            &[lit(1i64)],
+            &DFSchema::empty(),
+            &[DataType::Int64],
+        )?;
+        check_data_type(&array_type, &DataType::Int64, false);
+
+        let array_type = fun.return_type_from_exprs(
+            &[lit(1i64), lit(ScalarValue::Null)],
+            &DFSchema::empty(),
+            &[DataType::Int64, DataType::Null],
+        )?;
+        check_data_type(&array_type, &DataType::Int64, true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_array_nullability() -> Result<()> {
+        let array = array_array::<i32>(
+            &[Arc::new(Int64Array::from_iter_values(0..5))],
+            DataType::Int64,
+        )?;
+
+        check_data_type(array.data_type(), &DataType::Int64, false);
+
+        let array = array_array::<i32>(
+            &[
+                Arc::new(Int64Array::from_iter_values(0..5)),
+                Arc::new(Int64Array::new_null(5)),
+            ],
+            DataType::Int64,
+        )?;
+
+        check_data_type(array.data_type(), &DataType::Int64, true);
+
+        Ok(())
+    }
 }
